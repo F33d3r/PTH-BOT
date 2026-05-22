@@ -1,0 +1,746 @@
+#include "BluetoothSerial.h"
+BluetoothSerial SerialBT;
+
+// ===== Motor Pins =====
+#define IN1 13
+#define IN2 27
+#define IN3 26
+#define IN4 25
+
+// ===== Ultrasonic =====
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+
+// ===== IR Sensors =====
+#define IR_LEFT 32
+#define IR_RIGHT 19
+
+// ===== LEDs =====
+#define BLUE_LEFT 33
+#define BLUE_RIGHT 17
+#define RED_LEFT 12
+#define RED_RIGHT 4
+
+// ===== PWM Settings =====
+#define PWM_FREQ 1000
+#define PWM_RES 8
+
+#define CH_IN1 0
+#define CH_IN2 1
+#define CH_IN3 2
+#define CH_IN4 3
+
+int speedValue = 170;
+int turnSpeed = 160;
+int danceSpeed = 190;
+
+// ===== Safety Default OFF =====
+bool robotEnabled = false;
+bool ultrasonicSafe = false;
+bool irSafe = false;
+
+int joyX = 0;
+int joyY = 0;
+
+int lightMode = 0;
+// 0 OFF, 1 POLICE, 2 HAZARD, 3 KNIGHT, 4 ALL ON
+
+int actionMode = 0;
+// 0 NONE, 1 DANCE, 2 SCARED, 3 PET
+
+unsigned long lastTelemetry = 0;
+unsigned long lastLight = 0;
+unsigned long lastAction = 0;
+
+int lightStep = 0;
+int actionStep = 0;
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("PyitTaingHtaung_Robot");
+
+  ledcSetup(CH_IN1, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_IN2, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_IN3, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_IN4, PWM_FREQ, PWM_RES);
+
+  ledcAttachPin(IN1, CH_IN1);
+  ledcAttachPin(IN2, CH_IN2);
+  ledcAttachPin(IN3, CH_IN3);
+  ledcAttachPin(IN4, CH_IN4);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(IR_LEFT, INPUT);
+  pinMode(IR_RIGHT, INPUT);
+
+  pinMode(BLUE_LEFT, OUTPUT);
+  pinMode(BLUE_RIGHT, OUTPUT);
+  pinMode(RED_LEFT, OUTPUT);
+  pinMode(RED_RIGHT, OUTPUT);
+
+  fullStopAll();
+
+  ultrasonicSafe = false;
+  irSafe = false;
+
+  Serial.println("Pyit Taing Htaung Robot Ready");
+  SerialBT.println("STATUS:PAUSE");
+  SerialBT.println("USOFF");
+  SerialBT.println("IROFF");
+}
+
+void loop() {
+  readBluetooth();
+
+  float distance = getDistanceInch();
+
+  if (!robotEnabled) {
+    stopMotor();
+  } else {
+    if (actionMode != 0) {
+      runAction();
+    } else {
+      if (ultrasonicSafe && joyY > 25 && distance > 0 && distance <= 6.0) {
+        obstacleWarningReaction();
+      } else {
+        driveByJoystick();
+      }
+    }
+  }
+
+  runLightEffect();
+
+  if (millis() - lastTelemetry > 500) {
+    lastTelemetry = millis();
+
+    SerialBT.print("DIST:");
+    SerialBT.println(distance);
+
+    SerialBT.print("SPEED:");
+    SerialBT.println(speedValue);
+
+    SerialBT.print("STATUS:");
+    SerialBT.println(robotEnabled ? "READY" : "PAUSE");
+
+    SerialBT.println(ultrasonicSafe ? "USON" : "USOFF");
+    SerialBT.println(irSafe ? "IRON" : "IROFF");
+  }
+}
+
+void readBluetooth() {
+  if (!SerialBT.available()) return;
+
+  String cmd = SerialBT.readStringUntil('\n');
+  cmd.trim();
+
+  if (cmd.length() == 0) return;
+
+  Serial.print("BT KEY = [");
+  Serial.print(cmd);
+  Serial.println("]");
+
+  if (actionMode != 0) stopAction();
+
+  if (cmd == "APP:CONNECTED") {
+    SerialBT.println("STATUS:PAUSE");
+    SerialBT.println(ultrasonicSafe ? "USON" : "USOFF");
+    SerialBT.println(irSafe ? "IRON" : "IROFF");
+  }
+
+  else if (cmd == "START" || cmd == "ON" || cmd == "POWER") {
+    robotEnabled = true;
+    joyX = 0;
+    joyY = 0;
+    actionMode = 0;
+    stopMotor();
+    SerialBT.println("STATUS:READY");
+  }
+
+  else if (cmd == "STOP" || cmd == "OFF" || cmd == "PAUSE") {
+    fullStopAll();
+    ultrasonicSafe = false;
+    irSafe = false;
+    SerialBT.println("STATUS:PAUSE");
+    SerialBT.println("USOFF");
+    SerialBT.println("IROFF");
+  }
+
+  else if (cmd == "F" || cmd == "FORWARD" || cmd == "UP") {
+    robotEnabled = true;
+    joyX = 0;
+    joyY = 100;
+  }
+
+  else if (cmd == "B" || cmd == "BACKWARD" || cmd == "DOWN") {
+    robotEnabled = true;
+    joyX = 0;
+    joyY = -100;
+  }
+
+  else if (cmd == "L" || cmd == "LEFT") {
+    robotEnabled = true;
+    joyX = -100;
+    joyY = 0;
+  }
+
+  else if (cmd == "R" || cmd == "RIGHT") {
+    robotEnabled = true;
+    joyX = 100;
+    joyY = 0;
+  }
+
+  else if (cmd == "S" || cmd == "BRAKE" || cmd == "RELEASE") {
+    joyX = 0;
+    joyY = 0;
+    stopMotor();
+  }
+
+  else if (cmd == "FL") {
+    robotEnabled = true;
+    joyX = -60;
+    joyY = 100;
+  }
+
+  else if (cmd == "FR") {
+    robotEnabled = true;
+    joyX = 60;
+    joyY = 100;
+  }
+
+  else if (cmd == "BL") {
+    robotEnabled = true;
+    joyX = -60;
+    joyY = -100;
+  }
+
+  else if (cmd == "BR") {
+    robotEnabled = true;
+    joyX = 60;
+    joyY = -100;
+  }
+
+  else if (cmd.startsWith("JOY:")) {
+    robotEnabled = true;
+    parseJoystick(cmd);
+  }
+
+  else if (cmd.startsWith("SPD:")) {
+    setSpeed255(cmd.substring(4).toInt());
+  }
+
+  else if (cmd.startsWith("SPEED:")) {
+    setSpeed255(cmd.substring(6).toInt());
+  }
+
+  else if (cmd.startsWith("V:")) {
+    setSpeed255(cmd.substring(2).toInt());
+  }
+
+  else if (cmd.startsWith("SCROLL:")) {
+    int percent = cmd.substring(7).toInt();
+    percent = constrain(percent, 0, 100);
+    speedValue = map(percent, 0, 100, 80, 255);
+    updateDerivedSpeeds();
+
+    SerialBT.print("SPEED:");
+    SerialBT.println(speedValue);
+  }
+
+  else if (cmd == "GEAR:1") setSpeed255(110);
+  else if (cmd == "GEAR:2") setSpeed255(170);
+  else if (cmd == "GEAR:3") setSpeed255(230);
+  else if (cmd == "GEAR:R") setSpeed255(255);
+
+  else if (cmd == "USON") {
+    ultrasonicSafe = true;
+    SerialBT.println("USON");
+  }
+
+  else if (cmd == "USOFF") {
+    ultrasonicSafe = false;
+    SerialBT.println("USOFF");
+  }
+
+  else if (cmd == "IRON") {
+    irSafe = true;
+    SerialBT.println("IRON");
+  }
+
+  else if (cmd == "IROFF") {
+    irSafe = false;
+    SerialBT.println("IROFF");
+  }
+
+  else if (cmd == "LIGHT:POLICE") lightMode = 1;
+  else if (cmd == "LIGHT:HAZARD") lightMode = 2;
+  else if (cmd == "LIGHT:KNIGHT") lightMode = 3;
+  else if (cmd == "LIGHT:ON") lightMode = 4;
+
+  else if (cmd == "LIGHT:OFF") {
+    lightMode = 0;
+    lightsOff();
+  }
+
+  else if (cmd == "DANCE") {
+    robotEnabled = true;
+    startAction(1);
+  }
+
+  else if (cmd == "SCARED") {
+    robotEnabled = true;
+    startAction(2);
+  }
+
+  else if (cmd == "PET") {
+    robotEnabled = true;
+    startAction(3);
+  }
+}
+
+void setSpeed255(int value) {
+  speedValue = constrain(value, 0, 255);
+  updateDerivedSpeeds();
+
+  SerialBT.print("SPEED:");
+  SerialBT.println(speedValue);
+}
+
+void updateDerivedSpeeds() {
+  turnSpeed = constrain(speedValue - 20, 70, 255);
+  danceSpeed = constrain(speedValue + 20, 100, 255);
+}
+
+void parseJoystick(String cmd) {
+  cmd.replace("JOY:", "");
+
+  int commaIndex = cmd.indexOf(',');
+  if (commaIndex == -1) return;
+
+  joyX = cmd.substring(0, commaIndex).toInt();
+  joyY = cmd.substring(commaIndex + 1).toInt();
+
+  joyX = constrain(joyX, -100, 100);
+  joyY = constrain(joyY, -100, 100);
+}
+
+void driveByJoystick() {
+  int deadZone = 8;
+
+  if (abs(joyX) < deadZone && abs(joyY) < deadZone) {
+    stopMotor();
+    return;
+  }
+
+  if (irSafe && groundDanger()) {
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+    digitalWrite(BLUE_LEFT, LOW);
+    digitalWrite(BLUE_RIGHT, LOW);
+
+    if (joyY > deadZone) stopMotor();
+    else if (joyY < -deadZone) backward(speedValue);
+    else if (joyX < -deadZone) turnLeft(turnSpeed);
+    else if (joyX > deadZone) turnRight(turnSpeed);
+    else stopMotor();
+
+    return;
+  }
+
+  int ySpeed = map(abs(joyY), 0, 100, 0, speedValue);
+  int xSpeed = map(abs(joyX), 0, 100, 0, turnSpeed);
+
+  ySpeed = constrain(ySpeed, 0, 255);
+  xSpeed = constrain(xSpeed, 0, 255);
+
+  if (joyY > deadZone) {
+    if (joyX < -deadZone) forwardLeft(ySpeed, xSpeed);
+    else if (joyX > deadZone) forwardRight(ySpeed, xSpeed);
+    else forward(ySpeed);
+  }
+
+  else if (joyY < -deadZone) {
+    if (joyX < -deadZone) backwardLeft(ySpeed, xSpeed);
+    else if (joyX > deadZone) backwardRight(ySpeed, xSpeed);
+    else backward(ySpeed);
+  }
+
+  else {
+    if (joyX < -deadZone) turnLeft(xSpeed);
+    else if (joyX > deadZone) turnRight(xSpeed);
+    else stopMotor();
+  }
+}
+
+void motorLeft(int spd) {
+  spd = constrain(spd, -255, 255);
+
+  if (spd > 0) {
+    ledcWrite(CH_IN1, spd);
+    ledcWrite(CH_IN2, 0);
+  } else if (spd < 0) {
+    ledcWrite(CH_IN1, 0);
+    ledcWrite(CH_IN2, -spd);
+  } else {
+    ledcWrite(CH_IN1, 0);
+    ledcWrite(CH_IN2, 0);
+  }
+}
+
+void motorRight(int spd) {
+  spd = constrain(spd, -255, 255);
+
+  if (spd > 0) {
+    ledcWrite(CH_IN3, spd);
+    ledcWrite(CH_IN4, 0);
+  } else if (spd < 0) {
+    ledcWrite(CH_IN3, 0);
+    ledcWrite(CH_IN4, -spd);
+  } else {
+    ledcWrite(CH_IN3, 0);
+    ledcWrite(CH_IN4, 0);
+  }
+}
+
+void forward(int spd) {
+  motorLeft(spd);
+  motorRight(spd);
+}
+
+void backward(int spd) {
+  motorLeft(-spd);
+  motorRight(-spd);
+}
+
+void turnLeft(int spd) {
+  motorLeft(-spd);
+  motorRight(spd);
+}
+
+void turnRight(int spd) {
+  motorLeft(spd);
+  motorRight(-spd);
+}
+
+void forwardLeft(int y, int x) {
+  motorLeft(constrain(y - x, 0, 255));
+  motorRight(y);
+}
+
+void forwardRight(int y, int x) {
+  motorLeft(y);
+  motorRight(constrain(y - x, 0, 255));
+}
+
+void backwardLeft(int y, int x) {
+  motorLeft(-constrain(y - x, 0, 255));
+  motorRight(-y);
+}
+
+void backwardRight(int y, int x) {
+  motorLeft(-y);
+  motorRight(-constrain(y - x, 0, 255));
+}
+
+void stopMotor() {
+  motorLeft(0);
+  motorRight(0);
+}
+
+void startAction(int mode) {
+  if (!robotEnabled) return;
+  if (irSafe && groundDanger()) return;
+
+  actionMode = mode;
+  actionStep = 0;
+  lastAction = 0;
+  joyX = 0;
+  joyY = 0;
+  stopMotor();
+}
+
+void stopAction() {
+  actionMode = 0;
+  actionStep = 0;
+  stopMotor();
+}
+
+void runAction() {
+  if (irSafe && groundDanger()) {
+    stopAction();
+    return;
+  }
+
+  if (actionMode == 1) danceAction();
+  else if (actionMode == 2) scaredAction();
+  else if (actionMode == 3) petAction();
+}
+
+void danceAction() {
+  if (millis() - lastAction < 160) return;
+  lastAction = millis();
+
+  int step = actionStep % 16;
+  lightsOff();
+
+  if (step == 0) {
+    forward(danceSpeed);
+    digitalWrite(BLUE_LEFT, HIGH);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else if (step == 1) {
+    backward(danceSpeed);
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+  }
+  else if (step == 2) {
+    turnLeft(danceSpeed);
+    digitalWrite(BLUE_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+  }
+  else if (step == 3) {
+    turnRight(danceSpeed);
+    digitalWrite(BLUE_RIGHT, HIGH);
+    digitalWrite(RED_LEFT, HIGH);
+  }
+  else if (step == 4) {
+    forward(danceSpeed);
+    digitalWrite(BLUE_LEFT, HIGH);
+  }
+  else if (step == 5) {
+    stopMotor();
+    allLightsOn();
+  }
+  else if (step == 6) {
+    turnLeft(255);
+    digitalWrite(RED_LEFT, HIGH);
+  }
+  else if (step == 7) {
+    turnLeft(255);
+    digitalWrite(BLUE_LEFT, HIGH);
+  }
+  else if (step == 8) {
+    turnRight(255);
+    digitalWrite(RED_RIGHT, HIGH);
+  }
+  else if (step == 9) {
+    turnRight(255);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else if (step == 10) {
+    backward(danceSpeed);
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+  }
+  else if (step == 11) {
+    stopMotor();
+    allLightsOn();
+  }
+  else if (step == 12) {
+    motorLeft(danceSpeed);
+    motorRight(danceSpeed / 2);
+    digitalWrite(BLUE_LEFT, HIGH);
+  }
+  else if (step == 13) {
+    motorLeft(danceSpeed / 2);
+    motorRight(danceSpeed);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else if (step == 14) {
+    turnLeft(danceSpeed);
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else {
+    stopMotor();
+    digitalWrite(RED_RIGHT, HIGH);
+    digitalWrite(BLUE_LEFT, HIGH);
+  }
+
+  actionStep++;
+}
+
+void scaredAction() {
+  if (millis() - lastAction < 130) return;
+  lastAction = millis();
+
+  int step = actionStep % 6;
+  lightsOff();
+
+  if (step % 2 == 0) {
+    backward(speedValue);
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+  } else {
+    stopMotor();
+    digitalWrite(BLUE_LEFT, HIGH);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+
+  actionStep++;
+}
+
+void petAction() {
+  if (millis() - lastAction < 220) return;
+  lastAction = millis();
+
+  int step = actionStep % 8;
+  lightsOff();
+
+  if (step == 0 || step == 1) {
+    forward(speedValue);
+    digitalWrite(BLUE_LEFT, HIGH);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else if (step == 2 || step == 3) {
+    stopMotor();
+    digitalWrite(RED_LEFT, HIGH);
+    digitalWrite(RED_RIGHT, HIGH);
+  }
+  else if (step == 4) {
+    turnLeft(turnSpeed);
+    digitalWrite(BLUE_LEFT, HIGH);
+  }
+  else if (step == 5) {
+    turnRight(turnSpeed);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+  else {
+    stopMotor();
+    digitalWrite(BLUE_LEFT, HIGH);
+    digitalWrite(BLUE_RIGHT, HIGH);
+  }
+
+  actionStep++;
+}
+
+float getDistanceInch() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 25000);
+
+  if (duration == 0) return -1;
+
+  float cm = duration * 0.0343 / 2.0;
+  return cm / 2.54;
+}
+
+bool groundDanger() {
+  int leftIR = digitalRead(IR_LEFT);
+  int rightIR = digitalRead(IR_RIGHT);
+
+  return (leftIR == HIGH || rightIR == HIGH);
+}
+
+void obstacleWarningReaction() {
+  int savedLightMode = lightMode;
+
+  stopAction();
+  stopMotor();
+
+  lightMode = 0;
+  lightsOff();
+
+  for (int i = 0; i < 2; i++) {
+    turnLeft(turnSpeed);
+    digitalWrite(RED_LEFT, HIGH);
+    delay(130);
+
+    turnRight(turnSpeed);
+    digitalWrite(RED_LEFT, LOW);
+    digitalWrite(RED_RIGHT, HIGH);
+    delay(130);
+
+    lightsOff();
+  }
+
+  stopMotor();
+
+  digitalWrite(RED_LEFT, HIGH);
+  digitalWrite(RED_RIGHT, HIGH);
+  delay(150);
+
+  joyX = 0;
+  joyY = 0;
+
+  lightsOff();
+  lightMode = savedLightMode;
+}
+
+void runLightEffect() {
+  if (actionMode != 0) return;
+  if (irSafe && groundDanger()) return;
+  if (lightMode == 0) return;
+
+  if (lightMode == 4) {
+    allLightsOn();
+    return;
+  }
+
+  if (millis() - lastLight < 200) return;
+  lastLight = millis();
+  lightStep++;
+
+  if (lightMode == 1) {
+    if (lightStep % 2 == 0) {
+      digitalWrite(BLUE_LEFT, HIGH);
+      digitalWrite(BLUE_RIGHT, LOW);
+      digitalWrite(RED_LEFT, LOW);
+      digitalWrite(RED_RIGHT, HIGH);
+    } else {
+      digitalWrite(BLUE_LEFT, LOW);
+      digitalWrite(BLUE_RIGHT, HIGH);
+      digitalWrite(RED_LEFT, HIGH);
+      digitalWrite(RED_RIGHT, LOW);
+    }
+  }
+
+  else if (lightMode == 2) {
+    bool state = lightStep % 2;
+    digitalWrite(RED_LEFT, state);
+    digitalWrite(RED_RIGHT, state);
+    digitalWrite(BLUE_LEFT, LOW);
+    digitalWrite(BLUE_RIGHT, LOW);
+  }
+
+  else if (lightMode == 3) {
+    lightsOff();
+
+    int pos = lightStep % 4;
+
+    if (pos == 0) digitalWrite(BLUE_LEFT, HIGH);
+    if (pos == 1) digitalWrite(RED_LEFT, HIGH);
+    if (pos == 2) digitalWrite(RED_RIGHT, HIGH);
+    if (pos == 3) digitalWrite(BLUE_RIGHT, HIGH);
+  }
+}
+
+void allLightsOn() {
+  digitalWrite(BLUE_LEFT, HIGH);
+  digitalWrite(BLUE_RIGHT, HIGH);
+  digitalWrite(RED_LEFT, HIGH);
+  digitalWrite(RED_RIGHT, HIGH);
+}
+
+void lightsOff() {
+  digitalWrite(BLUE_LEFT, LOW);
+  digitalWrite(BLUE_RIGHT, LOW);
+  digitalWrite(RED_LEFT, LOW);
+  digitalWrite(RED_RIGHT, LOW);
+}
+
+void fullStopAll() {
+  robotEnabled = false;
+  actionMode = 0;
+  joyX = 0;
+  joyY = 0;
+  lightMode = 0;
+  stopMotor();
+  lightsOff();
+}
