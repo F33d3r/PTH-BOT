@@ -1,0 +1,97 @@
+#define CUSTOM_SETTINGS
+#define INCLUDE_GAMEPAD_MODULE
+
+#include <DabbleESP32.h>
+
+// Motor Pins
+#define IN1 13
+#define IN2 27
+#define IN3 26
+#define IN4 25
+
+void setup() {
+  Serial.begin(115200);
+
+  Dabble.begin("PyitTaingHtaung_Robot");
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  stopMotor();
+
+  Serial.println("Dabble Accelerometer Mode Ready");
+}
+
+void loop() {
+  Dabble.processInput();
+
+  int x = GamePad.getXaxisData();  // -7 to 7
+  int y = GamePad.getYaxisData();  // -7 to 7
+
+  Serial.print("X: ");
+  Serial.print(x);
+  Serial.print(" | Y: ");
+  Serial.println(y);
+
+  int deadZone = 2;
+
+  if (abs(x) <= deadZone && abs(y) <= deadZone) {
+    stopMotor();
+  }
+  else if (y > deadZone) {
+    forward();
+  }
+  else if (y < -deadZone) {
+    backward();
+  }
+  else if (x < -deadZone) {
+    turnLeft();
+  }
+  else if (x > deadZone) {
+    turnRight();
+  }
+
+  delay(30);
+}
+
+void forward() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void backward() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void turnLeft() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void turnRight() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
