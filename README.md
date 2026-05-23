@@ -1,2 +1,2 @@
-Accelerometer Mode ( Dabble controller )
-Customize app Control (PTH Controller apk)
+(1) Accelerometer Mode ( Dabble controller ) <br>
+(2) Customize app Control (PTH Controller apk)
