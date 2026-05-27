@@ -1,0 +1,525 @@
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// ================= BLE =================
+
+#define DEVICE_NAME "ESP32_ROBOT_CAR"
+
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define RX_UUID      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define TX_UUID      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+// ================= MOTOR =================
+// From schematic
+
+#define LEFT_IN1   13
+#define LEFT_IN2   27
+
+#define RIGHT_IN1  26
+#define RIGHT_IN2  25
+
+// ================= LED =================
+
+#define LED_FL 33
+#define LED_FR 17
+
+#define LED_RL 12
+#define LED_RR 4
+
+// ================= ULTRASONIC =================
+
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+
+// ================= BLE =================
+
+BLEServer* server;
+BLECharacteristic* txChar;
+
+bool connected = false;
+
+// ================= CAR STATE =================
+
+String gear = "N";
+
+bool drivePressed = false;
+
+int speedPercent = 70;
+
+int steer = 0;
+
+// ================= TIMERS =================
+
+unsigned long lastTelemetry = 0;
+unsigned long lastSignal = 0;
+unsigned long lastSonic = 0;
+
+// ================= SIGNAL =================
+
+String signalMode = "OFF";
+
+bool signalBlink = false;
+
+// ================= SONIC =================
+
+long currentCM = -1;
+
+// =================================================
+// SONIC
+// =================================================
+
+long readDistanceCM() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 25000);
+
+  if (duration <= 0) {
+    return -1;
+  }
+
+  long cm = duration / 58;
+
+  if (cm < 2 || cm > 400) {
+    return -1;
+  }
+
+  return cm;
+}
+
+// =================================================
+// MOTOR
+// =================================================
+
+void motorStop() {
+
+  digitalWrite(LEFT_IN1, LOW);
+  digitalWrite(LEFT_IN2, LOW);
+
+  digitalWrite(RIGHT_IN1, LOW);
+  digitalWrite(RIGHT_IN2, LOW);
+}
+
+void moveForward() {
+
+  // obstacle block
+
+  if (currentCM > 0 && currentCM <= 16) {
+
+    motorStop();
+
+    Serial.println("BLOCKED");
+
+    return;
+  }
+
+  // steering logic
+
+  if (steer < -20) {
+
+    // LEFT TURN
+
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, LOW);
+
+    digitalWrite(RIGHT_IN1, HIGH);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+
+  else if (steer > 20) {
+
+    // RIGHT TURN
+
+    digitalWrite(LEFT_IN1, HIGH);
+    digitalWrite(LEFT_IN2, LOW);
+
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+
+  else {
+
+    // STRAIGHT
+
+    digitalWrite(LEFT_IN1, HIGH);
+    digitalWrite(LEFT_IN2, LOW);
+
+    digitalWrite(RIGHT_IN1, HIGH);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+}
+
+void moveReverse() {
+
+  if (steer < -20) {
+
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, LOW);
+
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, HIGH);
+  }
+
+  else if (steer > 20) {
+
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, HIGH);
+
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, LOW);
+  }
+
+  else {
+
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, HIGH);
+
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, HIGH);
+  }
+}
+
+void updateDrive() {
+
+  if (!drivePressed) {
+
+    motorStop();
+
+    return;
+  }
+
+  if (gear == "D") {
+
+    moveForward();
+  }
+
+  else if (gear == "R") {
+
+    moveReverse();
+  }
+
+  else {
+
+    motorStop();
+  }
+}
+
+// =================================================
+// SIGNAL
+// =================================================
+
+void updateSignal() {
+
+  if (millis() - lastSignal < 300) return;
+
+  lastSignal = millis();
+
+  signalBlink = !signalBlink;
+
+  if (signalMode == "LEFT") {
+
+    digitalWrite(LED_FL, signalBlink);
+    digitalWrite(LED_RL, signalBlink);
+
+    digitalWrite(LED_FR, LOW);
+
+    if (gear == "N")
+      digitalWrite(LED_RR, HIGH);
+    else
+      digitalWrite(LED_RR, LOW);
+  }
+
+  else if (signalMode == "RIGHT") {
+
+    digitalWrite(LED_FR, signalBlink);
+    digitalWrite(LED_RR, signalBlink);
+
+    digitalWrite(LED_FL, LOW);
+
+    if (gear == "N")
+      digitalWrite(LED_RL, HIGH);
+    else
+      digitalWrite(LED_RL, LOW);
+  }
+
+  else if (signalMode == "HAZARD") {
+
+    digitalWrite(LED_FL, signalBlink);
+    digitalWrite(LED_FR, signalBlink);
+
+    digitalWrite(LED_RL, signalBlink);
+    digitalWrite(LED_RR, signalBlink);
+  }
+
+  else {
+
+    digitalWrite(LED_FL, LOW);
+    digitalWrite(LED_FR, LOW);
+
+    if (gear == "N") {
+
+      digitalWrite(LED_RL, HIGH);
+      digitalWrite(LED_RR, HIGH);
+    }
+
+    else {
+
+      digitalWrite(LED_RL, LOW);
+      digitalWrite(LED_RR, LOW);
+    }
+  }
+}
+
+// =================================================
+// BLE CALLBACK
+// =================================================
+
+class ServerCB : public BLEServerCallbacks {
+
+  void onConnect(BLEServer* s) {
+
+    connected = true;
+
+    Serial.println("CONNECTED");
+  }
+
+  void onDisconnect(BLEServer* s) {
+
+    connected = false;
+
+    drivePressed = false;
+
+    motorStop();
+
+    Serial.println("DISCONNECTED");
+
+    BLEDevice::startAdvertising();
+  }
+};
+
+class RXCB : public BLECharacteristicCallbacks {
+
+  void onWrite(BLECharacteristic* c) {
+
+    std::string v = c->getValue();
+
+    if (v.length() == 0) return;
+
+    String cmd = String(v.c_str());
+
+    cmd.trim();
+
+    Serial.print("RX: ");
+    Serial.println(cmd);
+
+    // ================= GEAR =================
+
+    if (cmd == "GEAR:D") {
+
+      gear = "D";
+    }
+
+    else if (cmd == "GEAR:N") {
+
+      gear = "N";
+
+      drivePressed = false;
+
+      motorStop();
+    }
+
+    else if (cmd == "GEAR:R") {
+
+      gear = "R";
+    }
+
+    // ================= DRIVE =================
+
+    else if (cmd == "DRIVE:1") {
+
+      drivePressed = true;
+    }
+
+    else if (cmd == "DRIVE:0") {
+
+      drivePressed = false;
+
+      motorStop();
+    }
+
+    // ================= STEER =================
+
+    else if (cmd.startsWith("STEER:")) {
+
+      steer = cmd.substring(6).toInt();
+
+      steer = constrain(steer, -90, 90);
+    }
+
+    // ================= SIGNAL =================
+
+    else if (cmd == "SIG:LEFT") {
+
+      signalMode = "LEFT";
+    }
+
+    else if (cmd == "SIG:RIGHT") {
+
+      signalMode = "RIGHT";
+    }
+
+    else if (cmd == "SIG:HAZARD") {
+
+      signalMode = "HAZARD";
+    }
+
+    else if (cmd == "SIG:OFF") {
+
+      signalMode = "OFF";
+    }
+  }
+};
+
+// =================================================
+// BLE SETUP
+// =================================================
+
+void setupBLE() {
+
+  BLEDevice::init(DEVICE_NAME);
+
+  server = BLEDevice::createServer();
+
+  server->setCallbacks(new ServerCB());
+
+  BLEService* service =
+    server->createService(SERVICE_UUID);
+
+  txChar = service->createCharacteristic(
+             TX_UUID,
+             BLECharacteristic::PROPERTY_NOTIFY
+           );
+
+  txChar->addDescriptor(new BLE2902());
+
+  BLECharacteristic* rxChar =
+    service->createCharacteristic(
+      RX_UUID,
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_WRITE_NR
+    );
+
+  rxChar->setCallbacks(new RXCB());
+
+  service->start();
+
+  BLEAdvertising* adv =
+    server->getAdvertising();
+
+  adv->addServiceUUID(SERVICE_UUID);
+
+  adv->setScanResponse(true);
+
+  BLEDevice::startAdvertising();
+
+  Serial.println("BLE READY");
+}
+
+// =================================================
+// SETUP
+// =================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+
+  pinMode(LED_FL, OUTPUT);
+  pinMode(LED_FR, OUTPUT);
+
+  pinMode(LED_RL, OUTPUT);
+  pinMode(LED_RR, OUTPUT);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  motorStop();
+
+  // neutral rear light
+
+  digitalWrite(LED_RL, HIGH);
+  digitalWrite(LED_RR, HIGH);
+
+  setupBLE();
+
+  Serial.println("SYSTEM READY");
+}
+
+// =================================================
+// LOOP
+// =================================================
+
+void loop() {
+
+  // ================= SONIC =================
+
+  if (millis() - lastSonic > 120) {
+
+    lastSonic = millis();
+
+    currentCM = readDistanceCM();
+
+    Serial.print("DIST:");
+    Serial.println(currentCM);
+  }
+
+  // ================= DRIVE =================
+
+  updateDrive();
+
+  // ================= SIGNAL =================
+
+  updateSignal();
+
+  // ================= TELEMETRY =================
+
+  if (connected && millis() - lastTelemetry > 200) {
+
+    lastTelemetry = millis();
+
+    String data = "";
+
+    data += "DIST:";
+    data += currentCM;
+
+    data += ";GEAR:";
+    data += gear;
+
+    data += ";STEER:";
+    data += steer;
+
+    data += ";";
+
+    txChar->setValue(data.c_str());
+
+    txChar->notify();
+
+    Serial.print("TX:");
+    Serial.println(data);
+  }
+
+  delay(10);
+}
